@@ -116,10 +116,6 @@ class TitanDBIterator : public Iterator {
     return record_.value;
   }
 
-  bool seqno(SequenceNumber* number) const override {
-    return iter_->seqno(number);
-  }
-
  private:
   bool ShouldGetBlobValue() {
     if (!iter_->Valid() || !iter_->IsBlob() || options_.key_only) {

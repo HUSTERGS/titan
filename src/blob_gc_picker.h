@@ -13,36 +13,38 @@
 #include "blob_storage.h"
 
 namespace rocksdb {
-namespace titandb {
+    namespace titandb {
 
-class BlobGCPicker {
- public:
-  BlobGCPicker(){};
-  virtual ~BlobGCPicker(){};
+        class BlobGCPicker {
+        public:
+            BlobGCPicker() {};
 
-  // Pick candidate blob files for a new gc.
-  // Returns nullptr if there is no gc to be done.
-  // Otherwise returns a pointer to a heap-allocated object that
-  // describes the gc.  Caller should delete the result.
-  virtual std::unique_ptr<BlobGC> PickBlobGC(BlobStorage* blob_storage) = 0;
-};
+            virtual ~BlobGCPicker() {};
 
-class BasicBlobGCPicker final : public BlobGCPicker {
- public:
-  BasicBlobGCPicker(TitanDBOptions, TitanCFOptions, TitanStats*);
-  ~BasicBlobGCPicker();
+            // Pick candidate blob files for a new gc.
+            // Returns nullptr if there is no gc to be done.
+            // Otherwise returns a pointer to a heap-allocated object that
+            // describes the gc.  Caller should delete the result.
+            virtual std::unique_ptr<BlobGC> PickBlobGC(BlobStorage *blob_storage) = 0;
+        };
 
-  std::unique_ptr<BlobGC> PickBlobGC(BlobStorage* blob_storage) override;
+        class BasicBlobGCPicker final : public BlobGCPicker {
+        public:
+            BasicBlobGCPicker(TitanDBOptions, TitanCFOptions, TitanStats *);
 
- private:
-  TitanDBOptions db_options_;
-  TitanCFOptions cf_options_;
-  TitanStats* stats_;
+            ~BasicBlobGCPicker();
 
-  // Check if blob_file needs to gc, return true means we need pick this
-  // file for gc
-  bool CheckBlobFile(BlobFileMeta* blob_file) const;
-};
+            std::unique_ptr<BlobGC> PickBlobGC(BlobStorage *blob_storage) override;
 
-}  // namespace titandb
+        private:
+            TitanDBOptions db_options_;
+            TitanCFOptions cf_options_;
+            TitanStats *stats_;
+
+            // Check if blob_file needs to gc, return true means we need pick this
+            // file for gc
+            bool CheckBlobFile(BlobFileMeta *blob_file) const;
+        };
+
+    }  // namespace titandb
 }  // namespace rocksdb

@@ -7,393 +7,417 @@
 #include "table/format.h"
 #include "util.h"
 
-namespace rocksdb {
-namespace titandb {
+namespace rocksdb
+{
+    namespace titandb
+    {
 
-// Blob file overall format:
-//
-// [blob file header]
-// [record head + record 1]
-// [record head + record 2]
-// ...
-// [record head + record N]
-// [blob file meta block 1]
-// [blob file meta block 2]
-// ...
-// [blob file meta block M]
-// [blob file meta index]
-// [blob file footer]
-//
-// For now, the only kind of meta block is an optional uncompression dictionary
-// indicated by a flag in the file header.
+        // Blob file overall format:
+        //
+        // [blob file header]
+        // [record head + record 1]
+        // [record head + record 2]
+        // ...
+        // [record head + record N]
+        // [blob file meta block 1]
+        // [blob file meta block 2]
+        // ...
+        // [blob file meta block M]
+        // [blob file meta index]
+        // [blob file footer]
+        //
+        // For now, the only kind of meta block is an optional uncompression dictionary
+        // indicated by a flag in the file header.
+        // 目前唯一的元数据块就是一可选的、未经压缩的字典，在文件头中标明
+        // blob头的格式
+        // Format of blob head (9 bytes):
+        //
+        //    +---------+---------+-------------+
+        //    |   crc   |  size   | compression |
+        //    +---------+---------+-------------+
+        //    | Fixed32 | Fixed32 |    char     |
+        //    +---------+---------+-------------+
+        //
+        const uint64_t kBlobMaxHeaderSize = 12;
+        const uint64_t kRecordHeaderSize = 9;
+        const uint64_t kBlobFooterSize = BlockHandle::kMaxEncodedLength + 8 + 4;
+        //
+        // Format of blob record (not fixed size):
+        //
+        //    +--------------------+----------------------+
+        //    |        key         |        value         |
+        //    +--------------------+----------------------+
+        //    | Varint64 + key_len | Varint64 + value_len |
+        //    +--------------------+----------------------+
+        //
+        struct BlobRecord
+        {
+            Slice key;
+            Slice value;
 
-// Format of blob head (9 bytes):
-//
-//    +---------+---------+-------------+
-//    |   crc   |  size   | compression |
-//    +---------+---------+-------------+
-//    | Fixed32 | Fixed32 |    char     |
-//    +---------+---------+-------------+
-//
-const uint64_t kBlobMaxHeaderSize = 12;
-const uint64_t kRecordHeaderSize = 9;
-const uint64_t kBlobFooterSize = BlockHandle::kMaxEncodedLength + 8 + 4;
+            void EncodeTo(std::string *dst) const;
+            Status DecodeFrom(Slice *src);
 
-// Format of blob record (not fixed size):
-//
-//    +--------------------+----------------------+
-//    |        key         |        value         |
-//    +--------------------+----------------------+
-//    | Varint64 + key_len | Varint64 + value_len |
-//    +--------------------+----------------------+
-//
-struct BlobRecord {
-  Slice key;
-  Slice value;
+            size_t size() const { return key.size() + value.size(); }
 
-  void EncodeTo(std::string* dst) const;
-  Status DecodeFrom(Slice* src);
+            friend bool operator==(const BlobRecord &lhs, const BlobRecord &rhs);
+        };
 
-  size_t size() const { return key.size() + value.size(); }
+        class BlobEncoder
+        {
+        public:
+            BlobEncoder(CompressionType compression, CompressionOptions compression_opt,
+                        const CompressionDict *compression_dict)
+                : compression_opt_(compression_opt),
+                  compression_ctx_(compression),
+                  compression_dict_(compression_dict),
+                  compression_info_(new CompressionInfo(
+                      compression_opt_, compression_ctx_, *compression_dict_, compression,
+                      0 /*sample_for_compression*/)) {}
+            BlobEncoder(CompressionType compression)
+                : BlobEncoder(compression, CompressionOptions(),
+                              &CompressionDict::GetEmptyDict()) {}
+            BlobEncoder(CompressionType compression,
+                        const CompressionDict *compression_dict)
+                : BlobEncoder(compression, CompressionOptions(), compression_dict) {}
+            BlobEncoder(CompressionType compression, CompressionOptions compression_opt)
+                : BlobEncoder(compression, compression_opt,
+                              &CompressionDict::GetEmptyDict()) {}
 
-  friend bool operator==(const BlobRecord& lhs, const BlobRecord& rhs);
-};
+            void EncodeRecord(const BlobRecord &record);
+            void EncodeSlice(const Slice &record);
+            void SetCompressionDict(const CompressionDict *compression_dict)
+            {
+                compression_dict_ = compression_dict;
+                compression_info_.reset(new CompressionInfo(
+                    compression_opt_, compression_ctx_, *compression_dict_,
+                    compression_info_->type(), compression_info_->SampleForCompression()));
+            }
 
-class BlobEncoder {
- public:
-  BlobEncoder(CompressionType compression, CompressionOptions compression_opt,
-              const CompressionDict* compression_dict)
-      : compression_opt_(compression_opt),
-        compression_ctx_(compression),
-        compression_dict_(compression_dict),
-        compression_info_(new CompressionInfo(
-            compression_opt_, compression_ctx_, *compression_dict_, compression,
-            0 /*sample_for_compression*/)) {}
-  BlobEncoder(CompressionType compression)
-      : BlobEncoder(compression, CompressionOptions(),
-                    &CompressionDict::GetEmptyDict()) {}
-  BlobEncoder(CompressionType compression,
-              const CompressionDict* compression_dict)
-      : BlobEncoder(compression, CompressionOptions(), compression_dict) {}
-  BlobEncoder(CompressionType compression, CompressionOptions compression_opt)
-      : BlobEncoder(compression, compression_opt,
-                    &CompressionDict::GetEmptyDict()) {}
+            Slice GetHeader() const { return Slice(header_, sizeof(header_)); }
+            Slice GetRecord() const { return record_; }
 
-  void EncodeRecord(const BlobRecord& record);
-  void EncodeSlice(const Slice& record);
-  void SetCompressionDict(const CompressionDict* compression_dict) {
-    compression_dict_ = compression_dict;
-    compression_info_.reset(new CompressionInfo(
-        compression_opt_, compression_ctx_, *compression_dict_,
-        compression_info_->type(), compression_info_->SampleForCompression()));
-  }
+            size_t GetEncodedSize() const { return sizeof(header_) + record_.size(); }
 
-  Slice GetHeader() const { return Slice(header_, sizeof(header_)); }
-  Slice GetRecord() const { return record_; }
+        private:
+            char header_[kRecordHeaderSize];
+            Slice record_;
+            std::string record_buffer_;
+            std::string compressed_buffer_;
+            CompressionOptions compression_opt_;
+            CompressionContext compression_ctx_;
+            const CompressionDict *compression_dict_;
+            std::unique_ptr<CompressionInfo> compression_info_;
+        };
 
-  size_t GetEncodedSize() const { return sizeof(header_) + record_.size(); }
+        class BlobDecoder
+        {
+        public:
+            BlobDecoder(const UncompressionDict *uncompression_dict,
+                        CompressionType compression = kNoCompression)
+                : compression_(compression), uncompression_dict_(uncompression_dict) {}
 
- private:
-  char header_[kRecordHeaderSize];
-  Slice record_;
-  std::string record_buffer_;
-  std::string compressed_buffer_;
-  CompressionOptions compression_opt_;
-  CompressionContext compression_ctx_;
-  const CompressionDict* compression_dict_;
-  std::unique_ptr<CompressionInfo> compression_info_;
-};
+            BlobDecoder()
+                : BlobDecoder(&UncompressionDict::GetEmptyDict(), kNoCompression) {}
 
-class BlobDecoder {
- public:
-  BlobDecoder(const UncompressionDict* uncompression_dict,
-              CompressionType compression = kNoCompression)
-      : compression_(compression), uncompression_dict_(uncompression_dict) {}
+            Status DecodeHeader(Slice *src);
+            Status DecodeRecord(Slice *src, BlobRecord *record, OwnedSlice *buffer);
 
-  BlobDecoder()
-      : BlobDecoder(&UncompressionDict::GetEmptyDict(), kNoCompression) {}
+            void SetUncompressionDict(const UncompressionDict *uncompression_dict)
+            {
+                uncompression_dict_ = uncompression_dict;
+            }
 
-  Status DecodeHeader(Slice* src);
-  Status DecodeRecord(Slice* src, BlobRecord* record, OwnedSlice* buffer);
+            size_t GetRecordSize() const { return record_size_; }
 
-  void SetUncompressionDict(const UncompressionDict* uncompression_dict) {
-    uncompression_dict_ = uncompression_dict;
-  }
+        private:
+            uint32_t crc_{0};
+            uint32_t header_crc_{0};
+            uint32_t record_size_{0};
+            CompressionType compression_{kNoCompression};
+            const UncompressionDict *uncompression_dict_;
+        };
+        // offset即为文件中的偏移量，而size表示从此偏移量开始的大小
+        // Format of blob handle (not fixed size):
+        //
+        //    +----------+----------+
+        //    |  offset  |   size   |
+        //    +----------+----------+
+        //    | Varint64 | Varint64 |
+        //    +----------+----------+
+        //
+        struct BlobHandle
+        {
+            uint64_t offset{0};
+            uint64_t size{0};
 
-  size_t GetRecordSize() const { return record_size_; }
+            void EncodeTo(std::string *dst) const;
+            Status DecodeFrom(Slice *src);
 
- private:
-  uint32_t crc_{0};
-  uint32_t header_crc_{0};
-  uint32_t record_size_{0};
-  CompressionType compression_{kNoCompression};
-  const UncompressionDict* uncompression_dict_;
-};
+            friend bool operator==(const BlobHandle &lhs, const BlobHandle &rhs);
+        };
 
-// Format of blob handle (not fixed size):
-//
-//    +----------+----------+
-//    |  offset  |   size   |
-//    +----------+----------+
-//    | Varint64 | Varint64 |
-//    +----------+----------+
-//
-struct BlobHandle {
-  uint64_t offset{0};
-  uint64_t size{0};
+        // Format of blob index (not fixed size):
+        //
+        //    +------+-------------+------------------------------------+
+        //    | type | file number |            blob handle             |
+        //    +------+-------------+------------------------------------+
+        //    | char |  Varint64   | Varint64(offsest) + Varint64(size) |
+        //    +------+-------------+------------------------------------+
+        //
+        // It is stored in LSM-Tree as the value of key, then Titan can use this blob
+        // index to locate actual value from blob file.
+        struct BlobIndex
+        {
+            enum Type : unsigned char
+            {
+                kBlobRecord = 1,
+            };
+            uint64_t file_number{0};
+            BlobHandle blob_handle;
 
-  void EncodeTo(std::string* dst) const;
-  Status DecodeFrom(Slice* src);
+            virtual ~BlobIndex() {}
 
-  friend bool operator==(const BlobHandle& lhs, const BlobHandle& rhs);
-};
+            void EncodeTo(std::string *dst) const;
+            Status DecodeFrom(Slice *src);
+            static void EncodeDeletionMarkerTo(std::string *dst);
+            static bool IsDeletionMarker(const BlobIndex &index);
 
-// Format of blob index (not fixed size):
-//
-//    +------+-------------+------------------------------------+
-//    | type | file number |            blob handle             |
-//    +------+-------------+------------------------------------+
-//    | char |  Varint64   | Varint64(offsest) + Varint64(size) |
-//    +------+-------------+------------------------------------+
-//
-// It is stored in LSM-Tree as the value of key, then Titan can use this blob
-// index to locate actual value from blob file.
-struct BlobIndex {
-  enum Type : unsigned char {
-    kBlobRecord = 1,
-  };
-  uint64_t file_number{0};
-  BlobHandle blob_handle;
+            bool operator==(const BlobIndex &rhs) const;
+        };
 
-  virtual ~BlobIndex() {}
+        struct MergeBlobIndex : public BlobIndex
+        {
+            uint64_t source_file_number{0};
+            uint64_t source_file_offset{0};
 
-  void EncodeTo(std::string* dst) const;
-  Status DecodeFrom(Slice* src);
-  static void EncodeDeletionMarkerTo(std::string* dst);
-  static bool IsDeletionMarker(const BlobIndex& index);
+            void EncodeTo(std::string *dst) const;
+            void EncodeToBase(std::string *dst) const;
+            Status DecodeFrom(Slice *src);
+            Status DecodeFromBase(Slice *src);
 
-  bool operator==(const BlobIndex& rhs) const;
-};
+            bool operator==(const MergeBlobIndex &rhs) const;
+        };
+        // 存放在manifest文件当中的数据。不是存放在blob中的数据
+        // Format of blob file meta (not fixed size):
+        //
+        //    +-------------+-----------+--------------+------------+
+        //    | file number | file size | file entries | file level |
+        //    +-------------+-----------+--------------+------------+
+        //    |  Varint64   | Varint64  |   Varint64   |  Varint32  |
+        //    +-------------+-----------+--------------+------------+
+        //    +--------------------+--------------------+
+        //    |    smallest key    |    largest key     |
+        //    +--------------------+--------------------+
+        //    | Varint32 + key_len | Varint32 + key_len |
+        //    +--------------------+--------------------+
+        //
+        // The blob file meta is stored in Titan's manifest for quick constructing of
+        // meta infomations of all the blob files in memory.
+        //
+        // Legacy format:
+        //
+        //    +-------------+-----------+
+        //    | file number | file size |
+        //    +-------------+-----------+
+        //    |  Varint64   | Varint64  |
+        //    +-------------+-----------+
+        //
+        class BlobFileMeta
+        {
+        public:
+            enum class FileEvent : int
+            {
+                kInit,
+                kFlushCompleted,
+                kCompactionCompleted,
+                kGCCompleted,
+                kGCBegin,
+                kGCOutput,
+                kFlushOrCompactionOutput,
+                kDbRestart,
+                kDelete,
+                kNeedMerge,
+                kReset, // reset file to normal for test
+            };
 
-struct MergeBlobIndex : public BlobIndex {
-  uint64_t source_file_number{0};
-  uint64_t source_file_offset{0};
+            enum class FileState : int
+            {
+                kInit, // file never at this state
+                kNormal,
+                kPendingLSM, // waiting keys adding to LSM
+                kBeingGC,    // being gced
+                kPendingGC,  // output of gc, waiting gc finish and keys adding to LSM
+                kObsolete,   // already gced, but wait to be physical deleted
+                kToMerge,    // need merge to new blob file in next compaction
+            };
 
-  void EncodeTo(std::string* dst) const;
-  void EncodeToBase(std::string* dst) const;
-  Status DecodeFrom(Slice* src);
-  Status DecodeFromBase(Slice* src);
+            BlobFileMeta() = default;
 
-  bool operator==(const MergeBlobIndex& rhs) const;
-};
+            BlobFileMeta(uint64_t _file_number, uint64_t _file_size,
+                         uint64_t _file_entries, uint32_t _file_level,
+                         const std::string &_smallest_key,
+                         const std::string &_largest_key)
+                : file_number_(_file_number),
+                  file_size_(_file_size),
+                  file_entries_(_file_entries),
+                  file_level_(_file_level),
+                  smallest_key_(_smallest_key),
+                  largest_key_(_largest_key) {}
 
-// Format of blob file meta (not fixed size):
-//
-//    +-------------+-----------+--------------+------------+
-//    | file number | file size | file entries | file level |
-//    +-------------+-----------+--------------+------------+
-//    |  Varint64   | Varint64  |   Varint64   |  Varint32  |
-//    +-------------+-----------+--------------+------------+
-//    +--------------------+--------------------+
-//    |    smallest key    |    largest key     |
-//    +--------------------+--------------------+
-//    | Varint32 + key_len | Varint32 + key_len |
-//    +--------------------+--------------------+
-//
-// The blob file meta is stored in Titan's manifest for quick constructing of
-// meta infomations of all the blob files in memory.
-//
-// Legacy format:
-//
-//    +-------------+-----------+
-//    | file number | file size |
-//    +-------------+-----------+
-//    |  Varint64   | Varint64  |
-//    +-------------+-----------+
-//
-class BlobFileMeta {
- public:
-  enum class FileEvent : int {
-    kInit,
-    kFlushCompleted,
-    kCompactionCompleted,
-    kGCCompleted,
-    kGCBegin,
-    kGCOutput,
-    kFlushOrCompactionOutput,
-    kDbRestart,
-    kDelete,
-    kNeedMerge,
-    kReset,  // reset file to normal for test
-  };
+            friend bool operator==(const BlobFileMeta &lhs, const BlobFileMeta &rhs);
 
-  enum class FileState : int {
-    kInit,  // file never at this state
-    kNormal,
-    kPendingLSM,  // waiting keys adding to LSM
-    kBeingGC,     // being gced
-    kPendingGC,   // output of gc, waiting gc finish and keys adding to LSM
-    kObsolete,    // already gced, but wait to be physical deleted
-    kToMerge,     // need merge to new blob file in next compaction
-  };
+            void EncodeTo(std::string *dst) const;
+            Status DecodeFrom(Slice *src);
+            Status DecodeFromLegacy(Slice *src);
 
-  BlobFileMeta() = default;
+            uint64_t file_number() const { return file_number_; }
+            uint64_t file_size() const { return file_size_; }
+            uint64_t live_data_size() const { return live_data_size_; }
+            uint32_t file_level() const { return file_level_; }
+            const std::string &smallest_key() const { return smallest_key_; }
+            const std::string &largest_key() const { return largest_key_; }
 
-  BlobFileMeta(uint64_t _file_number, uint64_t _file_size,
-               uint64_t _file_entries, uint32_t _file_level,
-               const std::string& _smallest_key,
-               const std::string& _largest_key)
-      : file_number_(_file_number),
-        file_size_(_file_size),
-        file_entries_(_file_entries),
-        file_level_(_file_level),
-        smallest_key_(_smallest_key),
-        largest_key_(_largest_key) {}
+            void set_live_data_size(uint64_t size) { live_data_size_ = size; }
+            uint64_t file_entries() const { return file_entries_; }
+            FileState file_state() const { return state_; }
+            bool is_obsolete() const { return state_ == FileState::kObsolete; }
 
-  friend bool operator==(const BlobFileMeta& lhs, const BlobFileMeta& rhs);
+            void FileStateTransit(const FileEvent &event);
+            bool UpdateLiveDataSize(int64_t delta)
+            {
+                int64_t result = static_cast<int64_t>(live_data_size_) + delta;
+                if (result < 0)
+                {
+                    live_data_size_ = 0;
+                    return false;
+                }
+                live_data_size_ = static_cast<uint64_t>(result);
+                return true;
+            }
+            bool NoLiveData() { return live_data_size_ == 0; }
+            double GetDiscardableRatio() const
+            {
+                if (file_size_ == 0)
+                {
+                    return 0;
+                }
+                // TODO: Exclude meta blocks from file size
+                return 1 - (static_cast<double>(live_data_size_) /
+                            (file_size_ - kBlobMaxHeaderSize - kBlobFooterSize));
+            }
+            TitanInternalStats::StatsType GetDiscardableRatioLevel() const;
 
-  void EncodeTo(std::string* dst) const;
-  Status DecodeFrom(Slice* src);
-  Status DecodeFromLegacy(Slice* src);
+        private:
+            // Persistent field
 
-  uint64_t file_number() const { return file_number_; }
-  uint64_t file_size() const { return file_size_; }
-  uint64_t live_data_size() const { return live_data_size_; }
-  uint32_t file_level() const { return file_level_; }
-  const std::string& smallest_key() const { return smallest_key_; }
-  const std::string& largest_key() const { return largest_key_; }
+            uint64_t file_number_{0};
+            uint64_t file_size_{0};
+            uint64_t file_entries_;
+            // Target level of compaction/flush which generates this blob file
+            uint32_t file_level_;
+            // Empty `smallest_key_` and `largest_key_` means smallest key is unknown,
+            // and can only happen when the file is from legacy version.
+            std::string smallest_key_;
+            std::string largest_key_;
 
-  void set_live_data_size(uint64_t size) { live_data_size_ = size; }
-  uint64_t file_entries() const { return file_entries_; }
-  FileState file_state() const { return state_; }
-  bool is_obsolete() const { return state_ == FileState::kObsolete; }
+            // Not persistent field
 
-  void FileStateTransit(const FileEvent& event);
-  bool UpdateLiveDataSize(int64_t delta) {
-    int64_t result = static_cast<int64_t>(live_data_size_) + delta;
-    if (result < 0) {
-      live_data_size_ = 0;
-      return false;
-    }
-    live_data_size_ = static_cast<uint64_t>(result);
-    return true;
-  }
-  bool NoLiveData() { return live_data_size_ == 0; }
-  double GetDiscardableRatio() const {
-    if (file_size_ == 0) {
-      return 0;
-    }
-    // TODO: Exclude meta blocks from file size
-    return 1 - (static_cast<double>(live_data_size_) /
-                (file_size_ - kBlobMaxHeaderSize - kBlobFooterSize));
-  }
-  TitanInternalStats::StatsType GetDiscardableRatioLevel() const;
+            // Size of data with reference from SST files.
+            //
+            // Because the new generated SST is added to superversion before
+            // `OnFlushCompleted()`/`OnCompactionCompleted()` is called, so if there is a
+            // later compaction trigger by the new generated SST, the later
+            // `OnCompactionCompleted()` maybe called before the previous events'
+            // `OnFlushCompleted()`/`OnCompactionCompleted()` is called.
+            // So when state_ == kPendingLSM, it uses this to record the delta as a
+            // positive number if any later compaction is trigger before previous
+            // `OnCompactionCompleted()` is called.
+            std::atomic<uint64_t> live_data_size_{0};
+            std::atomic<FileState> state_{FileState::kInit};
+        };
 
- private:
-  // Persistent field
+        // Format of blob file header for version 1 (8 bytes):
+        //
+        //    +--------------+---------+
+        //    | magic number | version |
+        //    +--------------+---------+
+        //    |   Fixed32    | Fixed32 |
+        //    +--------------+---------+
+        //
+        // For version 2, there are another 4 bytes for flags:
+        //
+        //    +--------------+---------+---------+
+        //    | magic number | version |  flags  |
+        //    +--------------+---------+---------+
+        //    |   Fixed32    | Fixed32 | Fixed32 |
+        //    +--------------+---------+---------+
+        //
+        // The header is mean to be compatible with header of BlobDB blob files, except
+        // we use a different magic number.
+        struct BlobFileHeader
+        {
+            // The first 32bits from $(echo titandb/blob | sha1sum).
+            static const uint32_t kHeaderMagicNumber = 0x2be0a614ul;
+            static const uint32_t kVersion1 = 1;
+            static const uint32_t kVersion2 = 2;
 
-  uint64_t file_number_{0};
-  uint64_t file_size_{0};
-  uint64_t file_entries_;
-  // Target level of compaction/flush which generates this blob file
-  uint32_t file_level_;
-  // Empty `smallest_key_` and `largest_key_` means smallest key is unknown,
-  // and can only happen when the file is from legacy version.
-  std::string smallest_key_;
-  std::string largest_key_;
+            static const uint64_t kMinEncodedLength = 4 + 4;
+            static const uint64_t kMaxEncodedLength = 4 + 4 + 4;
 
-  // Not persistent field
+            // Flags:
+            static const uint32_t kHasUncompressionDictionary = 1 << 0;
 
-  // Size of data with reference from SST files.
-  //
-  // Because the new generated SST is added to superversion before
-  // `OnFlushCompleted()`/`OnCompactionCompleted()` is called, so if there is a
-  // later compaction trigger by the new generated SST, the later
-  // `OnCompactionCompleted()` maybe called before the previous events'
-  // `OnFlushCompleted()`/`OnCompactionCompleted()` is called.
-  // So when state_ == kPendingLSM, it uses this to record the delta as a
-  // positive number if any later compaction is trigger before previous
-  // `OnCompactionCompleted()` is called.
-  std::atomic<uint64_t> live_data_size_{0};
-  std::atomic<FileState> state_{FileState::kInit};
-};
+            uint32_t version = kVersion2;
+            uint32_t flags = 0;
 
-// Format of blob file header for version 1 (8 bytes):
-//
-//    +--------------+---------+
-//    | magic number | version |
-//    +--------------+---------+
-//    |   Fixed32    | Fixed32 |
-//    +--------------+---------+
-//
-// For version 2, there are another 4 bytes for flags:
-//
-//    +--------------+---------+---------+
-//    | magic number | version |  flags  |
-//    +--------------+---------+---------+
-//    |   Fixed32    | Fixed32 | Fixed32 |
-//    +--------------+---------+---------+
-//
-// The header is mean to be compatible with header of BlobDB blob files, except
-// we use a different magic number.
-struct BlobFileHeader {
-  // The first 32bits from $(echo titandb/blob | sha1sum).
-  static const uint32_t kHeaderMagicNumber = 0x2be0a614ul;
-  static const uint32_t kVersion1 = 1;
-  static const uint32_t kVersion2 = 2;
+            uint64_t size() const
+            {
+                return version == BlobFileHeader::kVersion1
+                           ? BlobFileHeader::kMinEncodedLength
+                           : BlobFileHeader::kMaxEncodedLength;
+            }
 
-  static const uint64_t kMinEncodedLength = 4 + 4;
-  static const uint64_t kMaxEncodedLength = 4 + 4 + 4;
+            void EncodeTo(std::string *dst) const;
+            Status DecodeFrom(Slice *src);
+        };
 
-  // Flags:
-  static const uint32_t kHasUncompressionDictionary = 1 << 0;
+        // Format of blob file footer (BlockHandle::kMaxEncodedLength + 12):
+        //
+        //    +---------------------+-------------+--------------+----------+
+        //    |  meta index handle  |   padding   | magic number | checksum |
+        //    +---------------------+-------------+--------------+----------+
+        //    | Varint64 + Varint64 | padding_len |   Fixed64    | Fixed32  |
+        //    +---------------------+-------------+--------------+----------+
+        //
+        // To make the blob file footer fixed size,
+        // the padding_len is `BlockHandle::kMaxEncodedLength - meta_handle_len`
+        struct BlobFileFooter
+        {
+            // The first 64bits from $(echo titandb/blob | sha1sum).
+            static const uint64_t kFooterMagicNumber{0x2be0a6148e39edc6ull};
+            static const uint64_t kEncodedLength{kBlobFooterSize};
 
-  uint32_t version = kVersion2;
-  uint32_t flags = 0;
+            BlockHandle meta_index_handle{BlockHandle::NullBlockHandle()};
 
-  uint64_t size() const {
-    return version == BlobFileHeader::kVersion1
-               ? BlobFileHeader::kMinEncodedLength
-               : BlobFileHeader::kMaxEncodedLength;
-  }
+            void EncodeTo(std::string *dst) const;
+            Status DecodeFrom(Slice *src);
 
-  void EncodeTo(std::string* dst) const;
-  Status DecodeFrom(Slice* src);
-};
+            friend bool operator==(const BlobFileFooter &lhs, const BlobFileFooter &rhs);
+        };
 
-// Format of blob file footer (BlockHandle::kMaxEncodedLength + 12):
-//
-//    +---------------------+-------------+--------------+----------+
-//    |  meta index handle  |   padding   | magic number | checksum |
-//    +---------------------+-------------+--------------+----------+
-//    | Varint64 + Varint64 | padding_len |   Fixed64    | Fixed32  |
-//    +---------------------+-------------+--------------+----------+
-//
-// To make the blob file footer fixed size,
-// the padding_len is `BlockHandle::kMaxEncodedLength - meta_handle_len`
-struct BlobFileFooter {
-  // The first 64bits from $(echo titandb/blob | sha1sum).
-  static const uint64_t kFooterMagicNumber{0x2be0a6148e39edc6ull};
-  static const uint64_t kEncodedLength{kBlobFooterSize};
+        // A convenient template to decode a const slice.
+        template <typename T>
+        Status DecodeInto(const Slice &src, T *target)
+        {
+            auto tmp = src;
+            auto s = target->DecodeFrom(&tmp);
+            if (s.ok() && !tmp.empty())
+            {
+                s = Status::Corruption(Slice());
+            }
+            return s;
+        }
 
-  BlockHandle meta_index_handle{BlockHandle::NullBlockHandle()};
-
-  void EncodeTo(std::string* dst) const;
-  Status DecodeFrom(Slice* src);
-
-  friend bool operator==(const BlobFileFooter& lhs, const BlobFileFooter& rhs);
-};
-
-// A convenient template to decode a const slice.
-template <typename T>
-Status DecodeInto(const Slice& src, T* target) {
-  auto tmp = src;
-  auto s = target->DecodeFrom(&tmp);
-  if (s.ok() && !tmp.empty()) {
-    s = Status::Corruption(Slice());
-  }
-  return s;
-}
-
-}  // namespace titandb
-}  // namespace rocksdb
+    } // namespace titandb
+} // namespace rocksdb
