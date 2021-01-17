@@ -45,13 +45,13 @@ namespace rocksdb
                                      BlobFileHeader *header);
 
             TitanCFOptions options_;
-            std::unique_ptr<RandomAccessFileReader> file_;
+            std::unique_ptr<RandomAccessFileReader> file_; // 单个blob文件
 
-            std::shared_ptr<Cache> cache_;
-            std::string cache_prefix_;
+            std::shared_ptr<Cache> cache_; // 缓存？
+            std::string cache_prefix_; // 不知道是什么
 
             // Information read from the file.
-            BlobFileFooter footer_;
+            BlobFileFooter footer_; // blob文件的footer，那为什么没有header?
 
             std::unique_ptr<UncompressionDict> uncompression_dict_ = nullptr;
 
