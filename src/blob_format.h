@@ -1,3 +1,9 @@
+/**
+ * 宏`#pragma once`与`#ifndef/#endif`功能类似，
+ * 用于保证文件只被编译一次，也就是保证文件之间相互include的时候不会出错。
+ * 前者的可移植性可能会差一些，但是能够完全消除重名的情况，因为判断是否重复的依据是"物理"上的文件，而不是定义的宏名
+ * 而后者还是需要担心是否出现重名
+ */
 #pragma once
 
 #include "rocksdb/options.h"
@@ -11,7 +17,11 @@ namespace rocksdb
 {
     namespace titandb
     {
-
+        /**
+         * blob文件的格式与leveldb中的sst文件似乎很像
+         * [blob header] + [header-list] + [meta-list] + [meta index] + [blob footer]
+         * titan中的meta似乎并没有真正使用，只是作为可选的拓展？
+         */
         // Blob file overall format:
         //
         // [blob file header]
@@ -30,6 +40,7 @@ namespace rocksdb
         // indicated by a flag in the file header.
         // 目前唯一的元数据块就是一可选的、未经压缩的字典，在文件头中标明
         // blob头的格式
+        // 一个blob文件对应一个blob头，
         // Format of blob head (9 bytes):
         //
         //    +---------+---------+-------------+
@@ -38,10 +49,23 @@ namespace rocksdb
         //    | Fixed32 | Fixed32 |    char     |
         //    +---------+---------+-------------+
         //
+        /**
+         * QUES: 为何这个长度和上面的head长度不一致，上面说的是`Format of blob head(9 bytes)`，
+         * 但是下面说的长度为9的是`kRecordHeaderSize`，所以上面的硬指的是一个record的header而不是整个blob文件的header？
+         */
         const uint64_t kBlobMaxHeaderSize = 12;
         const uint64_t kRecordHeaderSize = 9;
-        const uint64_t kBlobFooterSize = BlockHandle::kMaxEncodedLength + 8 + 4;
+        const uint64_t kBlobFooterSize = BlockHandle::kMaxEncodedLength + 8 + 4;  // ?
         //
+        /**
+         * QUES: 为何len在后面？
+         * ANS: 下面这个其实有问题，实际存储的时候是像下面这样的
+         * +--------------------------------+------------------------------------+
+         * |              key               |                value               |
+         * +--------------------------------+------------------------------------+
+         * | key_len(varint) + key(fixed)   |  value_len(varint) + value(fixed)  |
+         * +--------------------------------+------------------------------------+
+         */
         // Format of blob record (not fixed size):
         //
         //    +--------------------+----------------------+
@@ -50,6 +74,9 @@ namespace rocksdb
         //    | Varint64 + key_len | Varint64 + value_len |
         //    +--------------------+----------------------+
         //
+        /**
+         * 一个Blob Record的数据，一个record就是一个key + value，使用Slice存储
+         */
         struct BlobRecord
         {
             Slice key;
@@ -62,7 +89,11 @@ namespace rocksdb
 
             friend bool operator==(const BlobRecord &lhs, const BlobRecord &rhs);
         };
-
+        /**
+         * 用于encode一个单独的record记录
+         * 最终encode的结果会保存在record_以及header_成员中
+         * 没有选择保存在外部传入的buffer中，可能是之后还有别的操作吧
+         */
         class BlobEncoder
         {
         public:
@@ -100,16 +131,19 @@ namespace rocksdb
             size_t GetEncodedSize() const { return sizeof(header_) + record_.size(); }
 
         private:
-            char header_[kRecordHeaderSize];
-            Slice record_;
-            std::string record_buffer_;
-            std::string compressed_buffer_;
+            char header_[kRecordHeaderSize]; // 保存一个record的header
+            Slice record_; // 存放Slice压缩好的`数据部分`
+            std::string record_buffer_; //用于临时保存record本身encode之后的Slice
+            std::string compressed_buffer_; // 以下都是压缩相关的
             CompressionOptions compression_opt_;
             CompressionContext compression_ctx_;
             const CompressionDict *compression_dict_;
             std::unique_ptr<CompressionInfo> compression_info_;
         };
 
+        /**
+         * 将数据最终解析为BlobRecord(key + value)
+         */
         class BlobDecoder
         {
         public:
@@ -145,7 +179,7 @@ namespace rocksdb
         //    +----------+----------+
         //    | Varint64 | Varint64 |
         //    +----------+----------+
-        //
+        // 可以将其理解为一个Blob指针？指向了某一个数据段
         struct BlobHandle
         {
             uint64_t offset{0};
@@ -167,13 +201,16 @@ namespace rocksdb
         //
         // It is stored in LSM-Tree as the value of key, then Titan can use this blob
         // index to locate actual value from blob file.
+        // 存储在LSM-Tree中作为key对应的value
+        // blob handle加上文件编号之后，形成了三元组（file-number offset size）可以用来定位某一个文件中的一个数据段
+        // 这里就是指向了一个BlobRecord？
         struct BlobIndex
         {
             enum Type : unsigned char
             {
                 kBlobRecord = 1,
             };
-            uint64_t file_number{0};
+            uint64_t file_number{0}; // 如果是0说明是deletion marker
             BlobHandle blob_handle;
 
             virtual ~BlobIndex() {}
@@ -186,6 +223,8 @@ namespace rocksdb
             bool operator==(const BlobIndex &rhs) const;
         };
 
+
+        // 完全不懂是用来干嘛的
         struct MergeBlobIndex : public BlobIndex
         {
             uint64_t source_file_number{0};
@@ -198,6 +237,13 @@ namespace rocksdb
 
             bool operator==(const MergeBlobIndex &rhs) const;
         };
+
+
+
+
+
+
+
         // 存放在manifest文件当中的数据。不是存放在blob中的数据
         // Format of blob file meta (not fixed size):
         //
@@ -296,6 +342,13 @@ namespace rocksdb
                 return true;
             }
             bool NoLiveData() { return live_data_size_ == 0; }
+            /**
+             * 计算得到可以丢弃的数据比例
+             * 减去blobheader以及footer之后，live_data_size_所占的比例
+             * 其实感觉这个地方，怎么说，可以进行微调？
+             * 作者没有将metablock的空间也去除，因为metablock实际上并没有实现
+             * @return
+             */
             double GetDiscardableRatio() const
             {
                 if (file_size_ == 0)
@@ -313,8 +366,10 @@ namespace rocksdb
 
             uint64_t file_number_{0};
             uint64_t file_size_{0};
+            // QUES: 不懂是什么
             uint64_t file_entries_;
             // Target level of compaction/flush which generates this blob file
+            // 生成当前blob文件的压缩或者刷新操作的目标level（在LSM树中）
             uint32_t file_level_;
             // Empty `smallest_key_` and `largest_key_` means smallest key is unknown,
             // and can only happen when the file is from legacy version.
@@ -337,6 +392,10 @@ namespace rocksdb
             std::atomic<FileState> state_{FileState::kInit};
         };
 
+
+
+
+
         // Format of blob file header for version 1 (8 bytes):
         //
         //    +--------------+---------+
@@ -355,6 +414,9 @@ namespace rocksdb
         //
         // The header is mean to be compatible with header of BlobDB blob files, except
         // we use a different magic number.
+        /**
+         * blob`文件`的头部
+         */
         struct BlobFileHeader
         {
             // The first 32bits from $(echo titandb/blob | sha1sum).
@@ -407,6 +469,7 @@ namespace rocksdb
         };
 
         // A convenient template to decode a const slice.
+        // 会通过调用参数target的DecodeFrom方法来将src中的数据解析道target中
         template <typename T>
         Status DecodeInto(const Slice &src, T *target)
         {

@@ -22,16 +22,23 @@ namespace rocksdb
 
         } // namespace
 
+        /******************************* 以下是BlobRecord相关成员函数 ******************************/
+
         /**
-         * 以下是BlobRecord相关成员函数
-         **/
-        // 分别将key和value存放到dst中
+         * 将key和value保存在dst中，其中包含了将其提取出来的所有信息（长度）
+         * @param dst 目标位置
+         */
         void BlobRecord::EncodeTo(std::string *dst) const
         {
             PutLengthPrefixedSlice(dst, key);
             PutLengthPrefixedSlice(dst, value);
         }
-        // 从src中将已经encode的信息，包括键和值重新取出来
+        /**
+         * 从src中将已经encode的信息，包括键和值重新取出来
+         * @param src 数据源
+         * @return 是否成功
+         * @details 调用这个方法的时候应该是使用一个空的BlobRecord，解析出来的数据（key/value）会直接存放在对象本身的成员中
+         */
         Status BlobRecord::DecodeFrom(Slice *src)
         {
             if (!GetLengthPrefixedSlice(src, &key) ||
@@ -47,19 +54,37 @@ namespace rocksdb
             return lhs.key == rhs.key && lhs.value == rhs.value;
         }
 
-        /**
-         * 以下是关于BlobEncoder的成员函数
-         * 主要负责加上专属于每一个record的头部信息，包括crc，大小以及压缩模式
+        /******************************* 以下是关于BlobEncoder的成员函数 ****************************
+         *          主要负责加上专属于每一个record的头部信息，包括crc，大小以及压缩模式
+         ************************************************************************************
          */
 
-        // 将record转化为Slice之后进行压缩
+        /**
+         * 将record转化为Slice之后进行压缩
+         * @param record 需要进行encode压缩的数据
+         * @details
+         * 一开始record是一个结构体，需要将其保存为Slice，具体存放在record_buffer_中
+         * 然后需要将Slice再进行压缩/crc等操作，保存在record_成员中
+         */
         void BlobEncoder::EncodeRecord(const BlobRecord &record)
         {
             record_buffer_.clear();
             record.EncodeTo(&record_buffer_);
             EncodeSlice(record_buffer_);
         }
-        // 主要负责将一个Slice进行压缩并加上头部信息
+        /**
+         * 主要负责将一个Slice(Record进行转化之后的Slice)进行压缩并加上头部信息
+         * @param record 要进行存储（可能发生压缩）的记录
+         * @details
+         * 1. 首先清除compressed_buffer_，为之后可能发生的压缩提供空间
+         * 2. 将record进行压缩，保存在record_成员中
+         * 3. 分别填充header的
+         *  3.1 size (record_的长度，也就是压缩好的数据的长度)
+         *  3.2 compression 压缩类型
+         *  3.3 crc校验值
+         *
+         *  最终有用的数据保存在record_以及header_成员中
+         */
         void BlobEncoder::EncodeSlice(const Slice &record)
         {
             compressed_buffer_.clear();
@@ -68,19 +93,25 @@ namespace rocksdb
                 Compress(*compression_info_, record, &compressed_buffer_, &compression);
 
             assert(record_.size() < std::numeric_limits<uint32_t>::max());
+            // header的存储顺序是[crc][4] + [size][4] + [compression][1]，所以从第四个字节开始存储record的大小
             EncodeFixed32(header_ + 4, static_cast<uint32_t>(record_.size()));
+            // 存储压缩类型
             header_[8] = compression;
-
+            // 先计算长度和压缩类型的crc
             uint32_t crc = crc32c::Value(header_ + 4, sizeof(header_) - 4);
+            // 然后再将其扩充到数据本身
             crc = crc32c::Extend(crc, record_.data(), record_.size());
+            // 保存在header的crc位置上
             EncodeFixed32(header_, crc);
         }
         
-        /**
-         * 以下是BlobDecoder的成员函数
-         */
+        /************** 以下是BlobDecoder的成员函数 ******************/
 
-        // 将src中的信息保存到BlobDecoder当中，用于后续解码，主要就是头部的三个信息，crc，size以及压缩模式
+        /**
+         * 将src中的信息保存到BlobDecoder当中，用于后续解码，主要就是头部的三个信息，crc，size以及压缩模式
+         * @param src 数据源
+         * @return 是否成功
+         */
         Status BlobDecoder::DecodeHeader(Slice *src)
         {
             if (!GetFixed32(src, &crc_))
@@ -98,20 +129,31 @@ namespace rocksdb
             compression_ = static_cast<CompressionType>(compression);
             return Status::OK();
         }
-
+        /**
+         * 将Record从src中解析出来，并保存在参数record当中，其中可能会进行解压缩操作
+         * @param src 数据源
+         * @param record 用于存放解析出来的数据
+         * @param buffer 不懂，似乎是用来临时保存解压出来的数据
+         * @return 是否成功
+         *
+         */
         Status BlobDecoder::DecodeRecord(Slice *src, BlobRecord *record,
                                          OwnedSlice *buffer)
         {
-            TEST_SYNC_POINT_CALLBACK("BlobDecoder::DecodeRecord", &crc_);
 
+            // QUES: 这是什么？
+            TEST_SYNC_POINT_CALLBACK("BlobDecoder::DecodeRecord", &crc_);
+            // 对数据做一个备份，因为下面要remove_prefix？
             Slice input(src->data(), record_size_);
+            // QUES: 为何会有这个操作，主要是不知道调用的时候src是个什么状态
+            // 可以发现后面其实都没有用到src，大概是因为src可能包含了很多歌record，这一步操作相当于是将src指向下一条数据
             src->remove_prefix(record_size_);
             uint32_t crc = crc32c::Extend(header_crc_, input.data(), input.size());
             if (crc != crc_)
             {
                 return Status::Corruption("BlobRecord", "checksum mismatch");
             }
-
+            // 如果没有进行压缩就直接decode
             if (compression_ == kNoCompression)
             {
                 return DecodeInto(input, record);
@@ -125,13 +167,21 @@ namespace rocksdb
             }
             return DecodeInto(*buffer, record);
         }
-
+        /*************** 以下是关于BlobHandle的成员函数 *************/
+        /**
+         * 字面意思
+         * @param dst
+         */
         void BlobHandle::EncodeTo(std::string *dst) const
         {
             PutVarint64(dst, offset);
             PutVarint64(dst, size);
         }
-
+        /**
+         * 字面意思
+         * @param src
+         * @return
+         */
         Status BlobHandle::DecodeFrom(Slice *src)
         {
             if (!GetVarint64(src, &offset) || !GetVarint64(src, &size))
@@ -147,7 +197,7 @@ namespace rocksdb
         }
 
 
-        // 以下是关于BlobIndex的成员函数
+        /****************** 以下是关于BlobIndex的成员函数 ******************/
 
         // 实际上这种encode/decode基本上都是把成员一个个编码/解码到Slice/string中？
         void BlobIndex::EncodeTo(std::string *dst) const
@@ -172,7 +222,13 @@ namespace rocksdb
             }
             return s;
         }
-        // deletion marker对应的BlobHandle就是一个空的？而且BlobIndex对应的file_number为0
+
+        /**
+         * deletion marker对应的BlobHandle就是一个空的？而且BlobIndex对应的file_number为0
+         * @param dst 目标位置
+         * @details
+         * 创建一个deletion marker，依次存放`类型`，`文件编号`，`BlobHandle`
+         */
         void BlobIndex::EncodeDeletionMarkerTo(std::string *dst)
         {
             dst->push_back(kBlobRecord);
@@ -190,7 +246,7 @@ namespace rocksdb
         {
             return (file_number == rhs.file_number && blob_handle == rhs.blob_handle);
         }
-        // 以下是MergBlobIndex的相关成员函数
+        /************************* 以下是MergBlobIndex的相关成员函数 *************************/
         void MergeBlobIndex::EncodeTo(std::string *dst) const
         {
             BlobIndex::EncodeTo(dst);
@@ -230,8 +286,11 @@ namespace rocksdb
                     BlobIndex::operator==(rhs));
         }
 
-        // 以下是关于BlobFileMeta的相关成员函数
-
+        /****************** 以下是关于BlobFileMeta的相关成员函数 ******************/
+        /**
+         * 直接存储各个成员，其中Slice类型的smallest_key以及largest_key需要先存放长度
+         * @param dst
+         */
         void BlobFileMeta::EncodeTo(std::string *dst) const
         {
             PutVarint64(dst, file_number_);
@@ -241,7 +300,11 @@ namespace rocksdb
             PutLengthPrefixedSlice(dst, smallest_key_);
             PutLengthPrefixedSlice(dst, largest_key_);
         }
-
+        /**
+         * 针对过去版本的decode函数，简单的取出file_number以及file_size即可
+         * @param src
+         * @return
+         */
         Status BlobFileMeta::DecodeFromLegacy(Slice *src)
         {
             if (!GetVarint64(src, &file_number_) || !GetVarint64(src, &file_size_))
@@ -252,7 +315,11 @@ namespace rocksdb
             assert(largest_key_.empty());
             return Status::OK();
         }
-
+        /**
+         * decode，分别取出各个成员
+         * @param src
+         * @return
+         */
         Status BlobFileMeta::DecodeFrom(Slice *src)
         {
             if (!GetVarint64(src, &file_number_) || !GetVarint64(src, &file_size_) ||
@@ -287,7 +354,10 @@ namespace rocksdb
                     lhs.file_entries_ == rhs.file_entries_ &&
                     lhs.file_level_ == rhs.file_level_);
         }
-        // 根据事件的类型将文件的状态转换为制定状态
+        /**
+         * 根据事件的类型将文件的状态转换为指定状态
+         * @param event 指定的事件类型
+         */
         void BlobFileMeta::FileStateTransit(const FileEvent &event)
         {
             switch (event)
@@ -351,7 +421,10 @@ namespace rocksdb
                 assert(false);
             }
         }
-
+        /**
+         * 根据某一个blob文件的ratio的具体`数值`返回一个标定Level的值
+         * @return
+         */
         TitanInternalStats::StatsType BlobFileMeta::GetDiscardableRatioLevel() const
         {
             auto ratio = GetDiscardableRatio();
@@ -385,7 +458,11 @@ namespace rocksdb
             }
             return type;
         }
-
+        /****************** 以下是关于BlobFileHeader的相关成员函数 ******************/
+        /**
+         * 依次存放三个成员
+         * @param dst
+         */
         void BlobFileHeader::EncodeTo(std::string *dst) const
         {
             PutFixed32(dst, kHeaderMagicNumber);
@@ -420,7 +497,14 @@ namespace rocksdb
             }
             return Status::OK();
         }
-
+        /****************** 以下是关于BlobFileFooter的相关成员函数 ******************/
+        /**
+         * 将footer编码到dst中
+         * @param dst 目标位置
+         * @details
+         * 需要注意的是，几个成员当中，只有meta_index_handle(BlockHandle类型)因为是使用两个varint来构建的。
+         * 所以就需要单独加入一些padding来使得整个footer的大小为一个固定值，方便解析？
+         */
         void BlobFileFooter::EncodeTo(std::string *dst) const
         {
             auto size = dst->size();
