@@ -27,7 +27,16 @@ namespace rocksdb
               cf_options_(cf_options),
               cache_(cache),
               stats_(stats) {}
-        // 尝试通过blobhandle获取blobrecord，存放在record中，如果在缓存中有的话那么直接从缓存中获取，如果没有命中缓存就进行相关的操作
+        /**
+         * 尝试通过blobhandle获取blobrecord，存放在record中，如果在缓存中有的话那么直接从缓存中获取，如果没有命中缓存就进行相关的操作
+         * @param options
+         * @param file_number
+         * @param file_size
+         * @param handle
+         * @param record
+         * @param buffer
+         * @return
+         */
         Status BlobFileCache::Get(const ReadOptions &options, uint64_t file_number,
                                   uint64_t file_size, const BlobHandle &handle,
                                   BlobRecord *record, PinnableSlice *buffer)
@@ -43,7 +52,7 @@ namespace rocksdb
             cache_->Release(cache_handle);
             return s;
         }
-        // 没看
+        // 返回一个BlobFilePrefetcher
         Status BlobFileCache::NewPrefetcher(
             uint64_t file_number, uint64_t file_size,
             std::unique_ptr<BlobFilePrefetcher> *result)
@@ -55,16 +64,27 @@ namespace rocksdb
 
             auto reader = reinterpret_cast<BlobFileReader *>(cache_->Value(cache_handle));
             auto prefetcher = new BlobFilePrefetcher(reader);
+            // QUES: 下面这个没看懂
             prefetcher->RegisterCleanup(&UnrefCacheHandle, cache_.get(), cache_handle);
             result->reset(prefetcher);
             return s;
         }
-        // 将某一个文件编号从缓存中去除出去
+        /**
+         * 将某一个文件编号从缓存中去除出去（因为cache中的key就是文件编号）
+         * @param file_number 需要去除的文件编号
+         */
         void BlobFileCache::Evict(uint64_t file_number)
         {
             cache_->Erase(EncodeFileNumber(&file_number));
         }
-        // 通过file_number获取cache的句柄，也就是找到对应文件的cache相关信息
+        /**
+         * 通过file_number获取cache的句柄，也就是找到对应文件的cache相关信息
+         * @param file_number 文件编号，将转化为字符串直接作为在cache中索引的key
+         * @param file_size 文件大小
+         * @param handle 不知道是什么，应该是用于存放返回值？如果在缓存中找到了，那么就会被直接赋值，如果没有找到就会在
+         * 向缓存中插入新的条目的时候进行赋值，可以通过`cache_->Value(handle)`来获得实际的`BlobFileReader *`类型的值
+         * @return
+         */
         Status BlobFileCache::FindFile(uint64_t file_number, uint64_t file_size,
                                        Cache::Handle **handle)
         {
