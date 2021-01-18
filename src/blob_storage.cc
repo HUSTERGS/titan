@@ -5,7 +5,18 @@ namespace rocksdb
 {
     namespace titandb
     {
-        // 似乎所有的文件访问都先经过cache
+        /**
+         * Gets the blob record pointed by the blob index. The provided
+         * buffer is used to store the record data, so the buffer must be
+         * valid when the record is used.
+         * 似乎所有的文件访问都先经过cache，通过index获取record，index存放在LSM中，首先通过index的file_number找到具体的文件，
+         * 然后通过file_cache_ -> 获得对应的record
+         * @param options
+         * @param index filename + blobhandle
+         * @param record 存放结果
+         * @param buffer
+         * @return
+         */
         Status BlobStorage::Get(const ReadOptions &options, const BlobIndex &index,
                                 BlobRecord *record, PinnableSlice *buffer)
         {
@@ -17,18 +28,36 @@ namespace rocksdb
             return file_cache_->Get(options, sfile->file_number(), sfile->file_size(),
                                     index.blob_handle, record, buffer);
         }
-
+        /**
+         * Creates a prefetcher for the specified file number.
+         * 为某一个特定的file number 创建prefetcher
+         * @param file_number
+         * @param result
+         * @return
+         */
         Status BlobStorage::NewPrefetcher(uint64_t file_number,
                                           std::unique_ptr<BlobFilePrefetcher> *result)
         {
+            // QUES: 以下
+            // weak ptr 的lock方法，似乎是如果要访问weak ptr指向的对象的话就需要先进行lock操作，对其进行`提升`？
             auto sfile = FindFile(file_number).lock();
             if (!sfile)
                 return Status::Corruption("Missing blob wfile: " +
                                           std::to_string(file_number));
+            // 其实file_number就应该等于sfile->file_number()，那么实际上上面的FindFile操作只是为了获得file_size？
+            // 因为有了file size才能够定位footer并进行读取，才能进行之后的读取操作
             return file_cache_->NewPrefetcher(sfile->file_number(), sfile->file_size(),
                                               result);
         }
-        // 遍历BlobStorage中与ranges重叠的部分，然后将符合要求的文件放入files中，老version以及被丢弃的文件将不会放入
+        /**
+         * 遍历BlobStorage中与ranges重叠的部分，然后将符合要求的文件放入files中，老version以及被丢弃的文件将不会放入
+         * 需要注意的是ranges是有多个范围区间的
+         * @param ranges
+         * @param n 获得的文件的数目上限
+         * @param include_end
+         * @param files 保存位置
+         * @return
+         */
         Status BlobStorage::GetBlobFilesInRanges(const RangePtr *ranges, size_t n,
                                                  bool include_end,
                                                  std::vector<uint64_t> *files)
@@ -38,6 +67,7 @@ namespace rocksdb
             {
                 const Slice *begin = ranges[i].start;
                 const Slice *end = ranges[i].limit;
+                // 一个column family 共用一个comparator
                 auto cmp = cf_options_.comparator;
 
                 std::string tmp;
@@ -79,7 +109,14 @@ namespace rocksdb
             }
             return Status::OK();
         }
-        // 加锁，同时尝试寻找对应的文件，并返回文件所对应的blobFileMeta
+
+        /**
+         * Finds the blob file meta for the specified file number
+         * 加锁，同时尝试在map类型的file_成员中寻找对应的文件，并返回文件所对应的blobFileMeta。
+         * 需要注意的是这个和blob_file_cache的FindFile方法不同
+         * @param file_number 文件编号
+         * @return
+         */
         std::weak_ptr<BlobFileMeta> BlobStorage::FindFile(uint64_t file_number) const
         {
             MutexLock l(&mutex_);
@@ -91,7 +128,13 @@ namespace rocksdb
             }
             return std::weak_ptr<BlobFileMeta>();
         }
-        // 将成员files_中的数据导出，需要锁操作
+
+
+        /**
+         * Exports all blob files' meta. Only for tests.
+         * 导出所有的 blob file 的meta数据，只是用来进行测试
+         * @param ret
+         */
         void BlobStorage::ExportBlobFiles(
             std::map<uint64_t, std::weak_ptr<BlobFileMeta>> &ret) const
         {
@@ -102,13 +145,18 @@ namespace rocksdb
                 ret.emplace(kv.first, std::weak_ptr<BlobFileMeta>(kv.second));
             }
         }
-        // 字面意思，需要修改files_, blob_ranges_, levels_file_count以及stats_
+
+        /**
+         * 字面意思，需要修改files_, blob_ranges_, levels_file_count以及stats_
+         * @param file
+         */
         void BlobStorage::AddBlobFile(std::shared_ptr<BlobFileMeta> &file)
         {
             MutexLock l(&mutex_);
             files_.emplace(std::make_pair(file->file_number(), file));
             blob_ranges_.emplace(std::make_pair(Slice(file->smallest_key()), file));
             levels_file_count_[file->file_level()]++;
+            // QUES: 下面应该是跟统计数据有关？
             if (file->live_data_size() != 0)
             {
                 // When live data size == 0, it means the live size of blob file is unknown
@@ -122,7 +170,12 @@ namespace rocksdb
                      file->file_size());
             AddStats(stats_, cf_id_, TitanInternalStats::NUM_LIVE_BLOB_FILE, 1);
         }
-
+        /**
+         * Mark the file as obsolete, and retrun value indicates whether the file is founded.
+         * @param file_number
+         * @param obsolete_sequence
+         * @return
+         */
         bool BlobStorage::MarkFileObsolete(uint64_t file_number,
                                            SequenceNumber obsolete_sequence)
         {
@@ -135,7 +188,13 @@ namespace rocksdb
             MarkFileObsoleteLocked(file->second, obsolete_sequence);
             return true;
         }
-        // 大概就是在obsolete_files_中添加文件编号以及过时编号，然后会转变文件的状态以及SubStats？
+
+        /**
+         * QUES: 还是不太懂这一套操作
+         * 大概就是在obsolete_files_中添加文件编号以及过时编号，然后会转变文件的状态以及SubStats？
+         * @param file
+         * @param obsolete_sequence
+         */
         void BlobStorage::MarkFileObsoleteLocked(std::shared_ptr<BlobFileMeta> file,
                                                  SequenceNumber obsolete_sequence)
         {
@@ -155,7 +214,12 @@ namespace rocksdb
                      file->file_size());
             AddStats(stats_, cf_id_, TitanInternalStats::NUM_OBSOLETE_BLOB_FILE, 1);
         }
-        // 在blob_ranges中去除文件，在files_中去除文件，在file_cache_中去除文件
+
+        /**
+         * 在blob_ranges中去除文件，在files_中去除文件，在file_cache_中去除文件
+         * @param file_number
+         * @return
+         */
         bool BlobStorage::RemoveFile(uint64_t file_number)
         {
             mutex_.AssertHeld();
@@ -183,7 +247,12 @@ namespace rocksdb
             file_cache_->Evict(file_number);
             return true;
         }
-        // 将编号小于oldest_sequence的过时的文件存放在obsolete_files中
+        /**
+         *
+         * 将编号小于oldest_sequence的过时的文件存进行删除，如果obsolete_files不为null的话就在其中保存一份备份
+         * @param obsolete_files
+         * @param oldest_sequence
+         */
         void BlobStorage::GetObsoleteFiles(std::vector<std::string> *obsolete_files,
                                            SequenceNumber oldest_sequence)
         {
@@ -217,7 +286,9 @@ namespace rocksdb
                 ++it;
             }
         }
-        // 计算每一个文件的分数，然后根据分数进行排序，结果保存在gc_score中
+        /**
+         * 计算每一个文件的分数，然后根据分数进行排序，结果保存在gc_score中
+         */
         void BlobStorage::ComputeGCScore()
         {
             // TODO: no need to recompute all everytime

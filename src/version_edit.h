@@ -14,6 +14,7 @@ namespace rocksdb
 
         enum Tag
         {
+            // QUES: 其实不知道为啥不直接用顺序的，而是需要避开2-9
             kNextFileNumber = 1,
             kColumnFamilyID = 10,
             kAddedBlobFile = 11,
@@ -59,6 +60,9 @@ namespace rocksdb
             uint32_t column_family_id_{0};
 
             std::vector<std::shared_ptr<BlobFileMeta>> added_files_;
+            // QUES: 为何deleted_files_和added_files_的内容不一样？
+            // 因为删除过的文件只有SequenceNumber吗
+            // 但是实际上Encode的时候又说SequenceNumber不是一个需要持久化的内容
             std::vector<std::pair<uint64_t, SequenceNumber>> deleted_files_;
         };
 

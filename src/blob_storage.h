@@ -168,7 +168,7 @@ namespace rocksdb
             // Only BlobStorage OWNS BlobFileMeta
             // file_number -> file_meta
             std::unordered_map<uint64_t, std::shared_ptr<BlobFileMeta>> files_;
-            std::vector<int> levels_file_count_;
+            std::vector<int> levels_file_count_; // 每一个level的文件的统计，当作数组来用
 
             class InternalComparator
             {
