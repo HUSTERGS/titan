@@ -44,7 +44,7 @@ namespace rocksdb
 
         private:
             std::vector<std::shared_ptr<BlobFileMeta>> inputs_;
-            std::vector<BlobFileMeta *> outputs_;
+            std::vector<BlobFileMeta *> outputs_; // 经过gc之后的文件？
             TitanCFOptions titan_cf_options_;
             ColumnFamilyHandle *cfh_{nullptr};
             // Whether need to trigger gc after this gc or not

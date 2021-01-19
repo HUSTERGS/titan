@@ -38,7 +38,10 @@ namespace rocksdb
             uint64_t header_size() const { return header_size_; }
 
             void IterateForPrev(uint64_t);
-
+            /**
+             * 把当前遍历到的位置，以BlobIndex的格式导出
+             * @return
+             */
             BlobIndex GetBlobIndex()
             {
                 BlobIndex blob_index;
@@ -80,7 +83,8 @@ namespace rocksdb
             void PrefetchAndGet();
             void GetBlobRecord();
         };
-        // 整个过程类似于多个文件的归并排序，通过最小堆来实现，堆中存放了每一个blob文件的iterator，current_保存了当前选中的迭代器
+        // 整个过程类似于多个文件的归并排序，通过最小堆来实现，
+        // 堆中存放了每一个blob文件的iterator，current_保存了当前选中的迭代器
         class BlobFileMergeIterator
         {
         public:

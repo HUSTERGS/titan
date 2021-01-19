@@ -414,9 +414,8 @@ namespace rocksdb
         //
         // The header is mean to be compatible with header of BlobDB blob files, except
         // we use a different magic number.
-        /**
-         * blob`文件`的头部
-         */
+        //
+        // blob`文件`的头部
         struct BlobFileHeader
         {
             // The first 32bits from $(echo titandb/blob | sha1sum).

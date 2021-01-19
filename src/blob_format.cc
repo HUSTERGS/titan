@@ -473,7 +473,11 @@ namespace rocksdb
                 PutFixed32(dst, flags);
             }
         }
-
+        /**
+         * decode函数可以处理两种不同version的头部格式
+         * @param src
+         * @return
+         */
         Status BlobFileHeader::DecodeFrom(Slice *src)
         {
             uint32_t magic_number = 0;
