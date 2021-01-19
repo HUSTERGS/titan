@@ -11,6 +11,11 @@ namespace rocksdb
 
         const size_t kMaxFileCacheSize = 1024 * 1024;
 
+        /**
+         * 注意初始化的时候，默认的file_cache_是LRU cache
+         * @param options
+         * @param stats
+         */
         BlobFileSet::BlobFileSet(const TitanDBOptions &options, TitanStats *stats)
             : dirname_(options.dirname),
               env_(options.env),
@@ -26,6 +31,15 @@ namespace rocksdb
             file_cache_ = NewLRUCache(file_cache_size);
         }
 
+        /**
+         * Sets up the storage specified in "options.dirname". If the manifest doesn't exist, it will create one.
+         * If the manifest exists, it will recover from the latest one.
+         * It is a corruption if the persistent storage contains data
+         * outside of the provided column families.
+         * 如果持久化的存储中已经存在了cf之外的数据，说明有问题
+         * @param column_families cf_id 到 cf_options 的映射
+         * @return
+         */
         Status BlobFileSet::Open(
             const std::map<uint32_t, TitanCFOptions> &column_families)
         {
@@ -43,7 +57,15 @@ namespace rocksdb
             }
             return OpenManifest(NewFileNumber());
         }
-        // 
+
+
+        // 1. 从CURRENT文件中获取manifest文件的文件名
+        // 2. 以SequentialFileReader打开manifest文件，也就是顺序读取，不是随机读取
+        // 3. 将manifest文件中的内容读取为一个个的VersionEdit，并保存在EditCollector当中
+        // 4. 对EditCollector中的内容依次进行执行
+        // 5. 获取并保存EditCollector中的next_file_number
+        // 6. 创建新的manifest文件
+        // 7. 删除过时的blob文件以及manifest文件
         Status BlobFileSet::Recover()
         {
             struct LogReporter : public log::Reader::Reporter
@@ -57,16 +79,17 @@ namespace rocksdb
             };
 
             // Reads "CURRENT" file, which contains the name of the current manifest file.
-            std::string manifest;
+            std::string manifest; // 用于保存当前manifest文件的文件名
             // 读取`CURRENY`文件，将其内容保存在manifest变量中，指示了当前manifets文件的文件名
             Status s = ReadFileToString(env_, CurrentFileName(dirname_), &manifest);
             if (!s.ok())
                 return s;
-            // 通过manifest文件是否以换行符为结尾来判断文件是否损坏
+            // 通过manifest文件是否以换行符为结尾来判断CURRENT文件是否损坏
             if (manifest.empty() || manifest.back() != '\n')
             {
                 return Status::Corruption("CURRENT file does not end with newline");
             }
+            // 去掉最后的换行符？来得到真正的manifest文件
             manifest.resize(manifest.size() - 1);
 
             // Opens the current manifest file.
@@ -94,6 +117,7 @@ namespace rocksdb
                 std::string scratch;
                 EditCollector collector;
                 // 其实并不清楚manifest文件的构造...？
+                // 反正就是一个一个读取记录读取为VersionEdit，然后加入到EditCollector当中
                 while (reader.ReadRecord(&record, &scratch) && s.ok())
                 {
                     VersionEdit edit;
@@ -113,6 +137,7 @@ namespace rocksdb
                     return s;
 
                 uint64_t next_file_number = 0;
+                // 获得collector当前的next_file_number并保存到对应成员
                 s = collector.GetNextFileNumber(&next_file_number);
                 if (!s.ok())
                     return s;
@@ -120,7 +145,7 @@ namespace rocksdb
                 ROCKS_LOG_INFO(db_options_.info_log,
                                "Next blob file number is %" PRIu64 ".", next_file_number);
             }
-
+            // 创建一个新的manifest文件
             auto new_manifest_file_number = NewFileNumber();
             s = OpenManifest(new_manifest_file_number);
             if (!s.ok())
@@ -150,6 +175,7 @@ namespace rocksdb
                                files_str.c_str());
                 // delete obsoleted files at reopen
                 // all the obsolete files's obsolete sequence are 0
+                // 删除过时文件之后剩下的就是alive文件
                 bs.second->GetObsoleteFiles(nullptr, kMaxSequenceNumber);
                 // 记录所有的活动的文件
                 for (const auto &f : bs.second->files_)
@@ -158,16 +184,19 @@ namespace rocksdb
                 }
             }
             std::vector<std::string> files;
+            // 将dirname_目录下的文件都加入files
             env_->GetChildren(dirname_, &files);
             // 删除不活动的文件，也就是不在alive_files中的文件
             for (const auto &f : files)
             {
                 uint64_t file_number;
                 FileType file_type;
+
                 if (!ParseFileName(f, &file_number, &file_type))
                     continue;
                 if (alive_files.find(file_number) != alive_files.end())
                     continue;
+                // 只对blob文件以及DescriptorFile进行删除，也就是manifest文件
                 if (file_type != FileType::kBlobFile &&
                     file_type != FileType::kDescriptorFile)
                     continue;
@@ -178,8 +207,12 @@ namespace rocksdb
 
             return Status::OK();
         }
-        // 打开file_number对应的Manifest文件，保存当前的快照，同时将CURRENT设置为新的manifest文件
-        // 这个地方其实不是很懂这个file_number对应的是一个新的文件还是旧的文件，也许并没有影响
+
+        /** 在调用的时候只被用来创建一个新的manifest文件，而不是打开一个旧的manifest文件。
+         * 打开file_number对应的Manifest文件，保存当前的快照，同时将CURRENT设置为新的manifest文件
+         * @param file_number manifest文件的编号
+         * @return
+         */
         Status BlobFileSet::OpenManifest(uint64_t file_number)
         {
             Status s;
@@ -200,6 +233,7 @@ namespace rocksdb
             s = WriteSnapshot(manifest_.get());
             if (s.ok())
             {
+                // QUES: 这里完全不知道在干什么
                 ImmutableDBOptions ioptions(db_options_);
                 s = SyncTitanManifest(env_, stats_, &ioptions, manifest_->file());
             }
@@ -209,6 +243,7 @@ namespace rocksdb
                 s = SetCurrentFile(env_, dirname_, file_number, nullptr);
             }
 
+
             if (!s.ok())
             {
                 manifest_.reset();
@@ -217,11 +252,18 @@ namespace rocksdb
             return s;
         }
 
+        /**
+         * 保存next_file_number_以及cf信息（有效文件列表），这就是所谓的snapshot？
+         * 大概是next_file_number就相当于一个编号？然后后面的文件列表就说明了当时有用的文件有哪些？
+         * @param log 用于向manifest文件写入的句柄
+         * @return
+         */
         Status BlobFileSet::WriteSnapshot(log::Writer *log)
         {
             Status s;
             // Saves global information
             {
+                // 在manifest中插入一个新的edit，其中唯一有效信息就是next_file_number_
                 VersionEdit edit;
                 edit.SetNextFileNumber(next_file_number_.load());
                 std::string record;
@@ -231,6 +273,7 @@ namespace rocksdb
                     return s;
             }
             // Saves column families information
+            // 将当前的cf信息写入manifest文件
             for (auto &it : this->column_families_)
             {
                 VersionEdit edit;
@@ -252,6 +295,7 @@ namespace rocksdb
             }
             return s;
         }
+
         // 写日志然后对EditCollector中的edit进行apply
         Status BlobFileSet::LogAndApply(VersionEdit &edit)
         {
@@ -278,24 +322,36 @@ namespace rocksdb
                 return s;
             return collector.Apply(*this);
         }
-        // 将参数column_families加入BlobFileSet中的`column_families_`成员
+
+        /**
+         * 将参数column_families加入BlobFileSet中的`column_families_`成员
+         * @param column_families cf_id 到 cf_options的映射
+         */
         void BlobFileSet::AddColumnFamilies(
             const std::map<uint32_t, TitanCFOptions> &column_families)
         {
             for (auto &cf : column_families)
             {
+
                 auto file_cache = std::make_shared<BlobFileCache>(db_options_, cf.second,
                                                                   file_cache_, stats_);
                 auto blob_storage = std::make_shared<BlobStorage>(
                     db_options_, cf.second, cf.first, file_cache, stats_);
                 if (stats_ != nullptr)
                 {
+                    // QUES: 不懂stat
                     stats_->InitializeCF(cf.first, blob_storage);
                 }
                 column_families_.emplace(cf.first, blob_storage);
             }
         }
-        // 每一个column_families可能对应了多个blob文件？所以需要对每一个进行测试，将column_families中包含的cf去掉
+
+        /**
+         * 将cf中的每一个文件都加入一个edit的删除操作中，并对edit进行apply，再将cf_id加入obsolete_columns
+         * @param column_families
+         * @param obsolete_sequence
+         * @return
+         */
         Status BlobFileSet::DropColumnFamilies(
             const std::vector<uint32_t> &column_families,
             SequenceNumber obsolete_sequence)
@@ -332,7 +388,11 @@ namespace rocksdb
             }
             return s;
         }
-        // 完全从磁盘上抹除某一个cf，但是实际上也只是进行了标注...？
+        /**
+         * 如果cf_id对应的storage当中的obsolete列表是空的，那么就从column_families_中将cf_id去除
+         * @param cf_id
+         * @return
+         */
         Status BlobFileSet::MaybeDestroyColumnFamily(uint32_t cf_id)
         {
             obsolete_columns_.erase(cf_id);
@@ -378,7 +438,11 @@ namespace rocksdb
                             cf_id);
             return Status::NotFound("invalid column family");
         }
-        // 没太看懂
+        /**
+         *
+         * @param obsolete_files 保存结果
+         * @param oldest_sequence
+         */
         void BlobFileSet::GetObsoleteFiles(std::vector<std::string> *obsolete_files,
                                            SequenceNumber oldest_sequence)
         {
