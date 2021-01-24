@@ -38,6 +38,11 @@ namespace rocksdb
             status_ = file_->Append(buffer);
         }
 
+        // 1. 如果还在积累阶段，那么就将数据添加到sample_records_当中，同时更新总长度等信息
+        //    1. 如果开启了压缩并且超出了预定值，那么就调用EnterUnbuffered进入kUnbuffered状态
+        // 2. 如果不在积累状态，那么就通过将encoder_对record进行编码（header + 压缩数据），
+        //    再调用WriteEncoderData来进行写入？
+        // 3. 通过比较smallest_key_以及largest_key_来确保数据是按照顺序插入的
         void BlobFileBuilder::Add(const BlobRecord &record,
                                   std::unique_ptr<BlobRecordContext> ctx,
                                   OutContexts *out_ctx)
@@ -45,6 +50,7 @@ namespace rocksdb
             if (!ok())
                 return;
             std::string key = record.key.ToString();
+            // 如果还在积累阶段，就向sample_records_添加数据
             if (builder_state_ == BuilderState::kBuffered)
             {
                 std::string record_str;
@@ -62,6 +68,7 @@ namespace rocksdb
             }
             else
             {
+                // 保存record相关信息到encoder_，并通过WriteEncoderData写入文件
                 encoder_.EncodeRecord(record);
                 WriteEncoderData(&ctx->new_blob_index.blob_handle);
                 out_ctx->emplace_back(std::move(ctx));
@@ -78,11 +85,14 @@ namespace rocksdb
             assert(cf_options_.comparator->Compare(record.key, Slice(largest_key_)) >= 0);
             largest_key_.assign(record.key.data(), record.key.size());
         }
+
+
         // 应该指的是添加小值的kv对
         void BlobFileBuilder::AddSmall(std::unique_ptr<BlobRecordContext> ctx)
         {
             cached_contexts_.emplace_back(std::move(ctx));
         }
+
         // 将Builder内存储的键值对进行压缩，然后创建新的blob文件
         void BlobFileBuilder::EnterUnbuffered(OutContexts *out_ctx)
         {
@@ -94,6 +104,7 @@ namespace rocksdb
             samples.reserve(sample_str_len_);
             std::vector<size_t> sample_lens;
 
+            // 保存sample_records_中每一个数据的长度到sample_lens
             for (const auto &record_str : sample_records_)
             {
                 samples.append(record_str, 0, record_str.size());
@@ -114,6 +125,15 @@ namespace rocksdb
             builder_state_ = BuilderState::kUnbuffered;
         }
         // sample应该是取样的意思，并不是例子的意思，没搞懂
+        // 大概懂了
+        // 有以下几种情况会添加数据
+        // 1. 添加小的键值，也就是`AddSmall`函数，这种情况下数据只会被加入cached_context_当中
+        // 2. 常规添加，那些需要加入blob文件的键值对，也就是`Add`函数，这时又分为两种情况
+        //   1. 在buffer状态，这时候就会将数据加入cached_context，以及sample_records，
+        //   2. 在unbuffer状态就会直接写入而不缓存，但是在这种情况下还是会加入到out_ctx
+        // 其中 sample_records似乎单纯只是为了进行所谓的压缩训练(compression training)，而又只有blob文件中的数据需要压缩（因为value）
+        // 很大。而真正进行写入的数据都在cached_context里面，其中包含了不管是大值还是小值的所有数据。最终这些数据会再进入out_ctx
+        // blob文件的结束并不是自动判定的，进入了Unbuffered的状态并不代表文件的写入要结束，而是需要进行一次压缩的训练
         void BlobFileBuilder::FlushSampleRecords(OutContexts *out_ctx)
         {
             // 可能是因为Add函数中先加入的sample_records_，然后再加入的cached_contexts，所以可以通过判断两者的成员大小来知道是否正确执行？
@@ -126,12 +146,14 @@ namespace rocksdb
             for (; sample_idx < sample_records_.size(); sample_idx++, ctx_idx++)
             {
                 const std::string &record_str = sample_records_[sample_idx];
+                // 不知道这个has_value判定什么时候会发生
                 for (; ctx_idx < cached_contexts_.size() &&
                        cached_contexts_[ctx_idx]->has_value;
                      ctx_idx++)
                 {
                     out_ctx->emplace_back(std::move(cached_contexts_[ctx_idx]));
                 }
+                // 跳出循环说明cache_context_[ctx_idx]的has_value字段为false
                 const std::unique_ptr<BlobRecordContext> &ctx = cached_contexts_[ctx_idx];
                 encoder_.EncodeSlice(record_str);
                 WriteEncoderData(&ctx->new_blob_index.blob_handle);
@@ -143,7 +165,9 @@ namespace rocksdb
             sample_str_len_ = 0;
             cached_contexts_.clear();
         }
+
         // 将保存在encoder中的信息写入到文件当中，同时更新对应handle的数据成员
+        // 使其指向写入的record当前的位置
         void BlobFileBuilder::WriteEncoderData(BlobHandle *handle)
         {
             handle->offset = file_->GetFileSize();
@@ -157,7 +181,7 @@ namespace rocksdb
                 num_entries_++;
             }
         }
-        // 分别将block以及crc写入文件
+        // 分别将block以及crc写入文件，只用于写入compression_dict以及meta_index
         void BlobFileBuilder::WriteRawBlock(const Slice &block, BlockHandle *handle)
         {
             handle->set_offset(file_->GetFileSize());
@@ -191,6 +215,7 @@ namespace rocksdb
                 meta_index_builder->Add(kCompressionDictBlock, handle);
             }
         }
+
         // 主要用来写入footer，然后启动Flush线程，
         Status BlobFileBuilder::Finish(OutContexts *out_ctx)
         {

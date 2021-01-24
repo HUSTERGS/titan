@@ -35,6 +35,8 @@ namespace rocksdb
         // meta index block with block handles pointed to the meta blocks. The
         // meta block and the meta index block are formatted the same as the
         // BlockBasedTable.
+        // 1. blob文件中record是按照顺序进行存放的。可能会发生压缩，压缩的粒度是record
+        // 2.
         class BlobFileBuilder
         {
         public:
@@ -45,6 +47,9 @@ namespace rocksdb
             //   `EnterUnbuffered()` to finalize the compression dictionary if enabled,
             //   compress/write out any buffered blocks, and proceed to the `kUnbuffered`
             //   state.
+            // - `kBuffered`: 表明有0个或多个数据块在内存中以未压缩的形式存在。在这个状态下调用`EnterUnbuffered()`函数，
+            //   如果启用了相关选项，就会将compression dictionary进行固化(finalize)，压缩或者写入那些还在内存中的数据，
+            //   同时进入`kUnbuffered`状态
             //
             // - `kUnbuffered`: This is the state when compression dictionary is finalized
             //   either because it wasn't enabled in the first place or it's been created
@@ -52,6 +57,7 @@ namespace rocksdb
             //   compressed/written out as they fill up. From this state, call `Finish()`
             //   to complete the file (write meta-blocks, etc.), or `Abandon()` to delete
             //   the partially created file.
+            // - `kUnbuffered`，
             enum class BuilderState
             {
                 kBuffered,
@@ -97,6 +103,7 @@ namespace rocksdb
             // This method will return modify output contexts when it is called in
             // `kBuffered` state.
             // REQUIRES: Finish(), Abandon() have not been called.
+            // 主要用来写入footer，然后启动Flush线程
             Status Finish(OutContexts *out_ctx);
 
             // Abandons building the table. If the caller is not going to call
