@@ -325,6 +325,7 @@ namespace rocksdb
 
         /**
          * 将参数column_families加入BlobFileSet中的`column_families_`成员
+         * 并创建对应的blob_storage以及storage所需的cache
          * @param column_families cf_id 到 cf_options的映射
          */
         void BlobFileSet::AddColumnFamilies(

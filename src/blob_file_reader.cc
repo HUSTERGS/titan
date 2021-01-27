@@ -19,8 +19,8 @@ namespace rocksdb
     namespace titandb
     {
         /**
-         * 创建一个新的Blob File Reader
-         *
+         * 创建一个新的Blob File Reader，但是只是针对文件本身，并不针对文件格式？
+         * 保存的格式是`RandomAccessFileReader`
          * @param file_number 目标blob文件编号，用于拼接成具体文件名
          * @param readahead_size 预读取大小？不知道有什么用
          * @param db_options 数据库配置

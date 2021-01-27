@@ -27,10 +27,12 @@ namespace rocksdb {
             bool maybe_continue_next_time = false;
             uint64_t next_gc_size = 0;
             for (auto &gc_score : blob_storage->gc_score()) {
+                // QUES: 为啥这个地方就直接break了
                 if (gc_score.score < cf_options_.blob_file_discardable_ratio) {
                     break;
                 }
                 auto blob_file = blob_storage->FindFile(gc_score.file_number).lock();
+                // 只有kNormal才需要gc
                 if (!CheckBlobFile(blob_file.get())) {
                     // Skip this file id this file is being GCed
                     // or this file had been GCed
@@ -41,6 +43,7 @@ namespace rocksdb {
                 if (!stop_picking) {
                     blob_files.emplace_back(blob_file);
                     batch_size += blob_file->file_size();
+                    // 估计输出的大小就是有效数据的大小，之所以是估计是因为还有文件头等信息
                     estimate_output_size += blob_file->live_data_size();
                     if (batch_size >= cf_options_.max_gc_batch_size ||
                         estimate_output_size >= cf_options_.blob_file_target_size) {
@@ -49,7 +52,9 @@ namespace rocksdb {
                         stop_picking = true;
                     }
                 } else {
-                    // 在需要gc的文件大小已经达到阈值之后，没有直接停止循环，而是继续计算，如果剩下的文件依然超过阈值，那么就启动计时器...？
+                    // 在需要gc的文件大小已经达到阈值之后，没有直接停止循环，而是继续计算，将gc_size累加到next_gc_size中
+                    // 如果在遍历完剩余所有文件的时候，超过了设定值，那么就说明对应的cf还需要一轮gc，
+                    // 那么就设定maybe_continue_next_time为true
                     next_gc_size += blob_file->file_size();
                     if (next_gc_size > cf_options_.min_gc_batch_size) {
                         maybe_continue_next_time = true;
@@ -82,7 +87,7 @@ namespace rocksdb {
             return std::unique_ptr<BlobGC>(new BlobGC(
                     std::move(blob_files), std::move(cf_options_), maybe_continue_next_time));
         }
-
+        // 通过检查blob文件当前的状态来判断文件是否刚刚经过了gc
         bool BasicBlobGCPicker::CheckBlobFile(BlobFileMeta *blob_file) const {
             assert(blob_file == nullptr ||
                    blob_file->file_state() != BlobFileMeta::FileState::kInit);

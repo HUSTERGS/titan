@@ -247,13 +247,16 @@ namespace rocksdb
             return (file_number == rhs.file_number && blob_handle == rhs.blob_handle);
         }
         /************************* 以下是MergBlobIndex的相关成员函数 *************************/
+
+        // 将MergBlobIndex编码到dst中，也就是分别调用基类BlobIndex的EncodeTo方法
+        // 然后保存自己的新成员source_file_number以及source_file_offset
         void MergeBlobIndex::EncodeTo(std::string *dst) const
         {
             BlobIndex::EncodeTo(dst);
             PutVarint64(dst, source_file_number);
             PutVarint64(dst, source_file_offset);
         }
-
+        // 调用基类BlobIndex的Encode方法
         void MergeBlobIndex::EncodeToBase(std::string *dst) const
         {
             BlobIndex::EncodeTo(dst);

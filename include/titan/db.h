@@ -7,7 +7,7 @@ namespace rocksdb {
 namespace titandb {
 
 struct TitanCFDescriptor {
-  std::string name;
+  std::string name; // 名字
   TitanCFOptions options;
   TitanCFDescriptor()
       : name(kDefaultColumnFamilyName), options(TitanCFOptions()) {}

@@ -19,10 +19,10 @@ namespace rocksdb
 
         struct TitanColumnFamilyInfo
         {
-            const std::string name;
-            const ImmutableTitanCFOptions immutable_cf_options;
-            MutableTitanCFOptions mutable_cf_options;
-            std::shared_ptr<TableFactory> base_table_factory;
+            const std::string name; // cf的名字
+            const ImmutableTitanCFOptions immutable_cf_options; // 不变的cf选项？
+            MutableTitanCFOptions mutable_cf_options; // 可变的选项？
+            std::shared_ptr<TableFactory> base_table_factory; //
             std::shared_ptr<TitanTableFactory> titan_table_factory;
         };
 
@@ -213,6 +213,7 @@ namespace rocksdb
                 std::map<uint64_t, int64_t> *blob_file_size_diff);
 
             // REQUIRE: mutex_ held
+            // 将cf_id加入到gc_queue_，也就是gc队列中，并增加  unscheduled_gc_
             void AddToGCQueue(uint32_t column_family_id)
             {
                 mutex_.AssertHeld();

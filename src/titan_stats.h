@@ -230,7 +230,7 @@ inline void SubStats(InternalOpStats* stats, InternalOpStatsType type,
 }
 
 // IOStatsContext helper
-
+// 从当前的iostate中获取bytes_read以及bytes_written写入，写入参数中
 inline void SavePrevIOBytes(uint64_t* prev_bytes_read,
                             uint64_t* prev_bytes_written) {
   IOStatsContext* io_stats = get_iostats_context();
